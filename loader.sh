@@ -8,7 +8,7 @@
 set -u
 
 # ---------- KONFIGURASI (edit sesuai kebutuhan) ----------
-ROBLOX_APK_URL="https://ISI-LINK-APK-ROBLOX-KAMU.apk"   # link download APK Roblox yang sudah kamu siapin
+ROBLOX_APK_URL="https://android.spdmteam.com/"   # link download APK Roblox yang sudah kamu siapin
 DOWNLOAD_DIR="$HOME/storage/downloads/RobloxLoader"      # folder simpan hasil download
 CONFIG_DIR="$HOME/.config/loader"
 CONFIG_FILE="$CONFIG_DIR/config.env"
