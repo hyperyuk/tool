@@ -8,6 +8,8 @@
 set -u
 
 # ---------- KONFIGURASI (edit sesuai kebutuhan) ----------
+LOADER_VERSION="1.2.0"
+LOADER_URL="https://raw.githubusercontent.com/hyperyuk/tool/main/loader.sh"   # link mentah loader di GitHub
 ROBLOX_APK_URL="https://android.spdmteam.com/"   # link download APK Roblox yang sudah kamu siapin
 DOWNLOAD_DIR="$HOME/storage/downloads/RobloxLoader"      # folder simpan hasil download
 CONFIG_DIR="$HOME/.config/loader"
@@ -16,6 +18,7 @@ MARKER_FILE="$CONFIG_DIR/.setup_done"
 CLONE_WORKDIR="$HOME/.cache/loader_clone_work"
 KEYSTORE_PATH="$CONFIG_DIR/clone.keystore"
 CLONES_LIST="$CONFIG_DIR/clones.list"
+SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 
 # ---------- WARNA ----------
 C_RESET="\033[0m"
@@ -30,15 +33,23 @@ ok()   { echo -e "${C_GREEN}[OK]${C_RESET} $1"; }
 warn() { echo -e "${C_YELLOW}[!]${C_RESET} $1"; }
 err()  { echo -e "${C_RED}[X]${C_RESET} $1"; }
 
-# read input yang tahan terhadap Enter (\r) dari keyboard Termux tertentu
+# read input yang tahan terhadap Enter (\r) dari keyboard Termux tertentu.
+# SELALU baca dari /dev/tty, bukan stdin - supaya prompt tidak pernah kebagian
+# baca dari file (bug: 'while read ... done < file' yang manggil fungsi berisi
+# read) dan tetap jalan walau script dijalankan via pipe.
 ask() {
     local _p="$1" _v="$2" _val _rc=0
-    IFS= read -rp "$_p" _val || _rc=$?
+    local _in="/dev/tty"
+    [ -r "$_in" ] || _in="-"
+    stty sane 2>/dev/null || true
+    # buang ketikan nyasar yang ketumpuk sebelum prompt muncul
+    while IFS= read -rsn1 -t 0.05 _ 2>/dev/null; do :; done <"$_in" || true
+    IFS= read -rp "$_p" _val <"$_in" || _rc=$?
     _val="${_val//[[:cntrl:]]/}"
     _val="${_val#"${_val%%[![:space:]]*}"}"
     _val="${_val%"${_val##*[![:space:]]}"}"
     if [ "$_rc" -ne 0 ] && [ -z "$_val" ]; then
-        err "Tidak ada input (stdin tertutup / EOF). Jalanin dengan 'bash loader.sh', bukan 'curl ... | bash'."
+        err "Tidak ada input (tty tertutup). Jalanin dengan 'bash loader.sh'."
         exit 1
     fi
     eval "$_v=\$_val"
@@ -57,7 +68,7 @@ run_setup() {
     echo -e "${C_BOLD}=== AUTO SETUP TERMUX DIMULAI ===${C_RESET}"
 
     log "Update & upgrade package..."
-    pkg update -y && pkg upgrade -y
+    pkg update -y && pkg upgrade -y || { err "pkg update/upgrade gagal - kemungkinan mirror lemot/matot. Ganti mirror lalu coba lagi (menu 9)."; return 1; }
     ok "pkg update & upgrade selesai"
 
     log "Minta izin storage (akan muncul popup izin, tekan Allow/Izinkan)..."
@@ -72,7 +83,18 @@ run_setup() {
     log "Install tools buat clone & sign APK (apktool, aapt, apksigner, java)..."
     pkg install -y openjdk-17 apktool aapt apksigner
     command -v zipalign >/dev/null 2>&1 || pkg install -y zipalign 2>/dev/null || true
-    ok "tools clone/sign terinstall (atau sudah ada)"
+
+    local missing=0 t
+    for t in java apktool aapt apksigner; do
+        command -v "$t" >/dev/null 2>&1 || { err "Tools '$t' belum keinstall."; missing=1; }
+    done
+    if [ "$missing" -ne 0 ]; then
+        warn "Setup BELUM selesai - ada package yang gagal terinstall (kemungkinan download kepotong)."
+        warn "Marker TIDAK dibuat, jadi setup akan otomatis dicoba lagi lain kali."
+        warn "Coba manual: pkg install -y openjdk-17 apktool aapt apksigner"
+        return 1
+    fi
+    ok "tools clone/sign terinstall"
 
     java -version >/dev/null 2>&1 && ok "Java (buat clone/sign) terdeteksi" || warn "Java belum kedetect, cek manual"
 
@@ -95,7 +117,7 @@ show_status() {
     echo -e "${C_CYAN}Android SDK     :${C_RESET} $(getprop ro.build.version.sdk 2>/dev/null || echo '-')"
     echo -e "${C_CYAN}Termux storage  :${C_RESET}"
     df -h "$HOME" 2>/dev/null
-    echo -e "${C_CYAN}Java (clone/sign):${C_RESET} $(java -version 2>&1 | head -1 || echo 'belum terinstall')"
+    echo -e "${C_CYAN}Java (clone/sign):${C_RESET} $(command -v java >/dev/null 2>&1 && java -version 2>&1 | head -1 || echo 'belum terinstall')"
     echo -e "${C_CYAN}apktool         :${C_RESET} $(command -v apktool >/dev/null 2>&1 && echo 'terinstall' || echo 'belum terinstall')"
     echo -e "${C_CYAN}Roblox packages :${C_RESET}"
     detect_roblox_packages | sed 's/^/    - /'
@@ -303,7 +325,7 @@ run_with_spinner() {
     local logfile
     logfile="$(mktemp)"
 
-    "$@" >"$logfile" 2>&1 &
+    "$@" </dev/null >"$logfile" 2>&1 &
     local pid=$!
     local spin='|/-\'
     local i=0
@@ -335,9 +357,10 @@ run_with_spinner() {
 # Keystore dibuat sekali, dipakai buat semua clone (biar update APK-nya
 # nanti dianggap "update" oleh Android, bukan install baru/conflict).
 ensure_keystore() {
-    if [ -f "$KEYSTORE_PATH" ]; then
+    if [ -f "$KEYSTORE_PATH" ] && [ -n "${KEYSTORE_PASS:-}" ]; then
         return
     fi
+    [ -f "$KEYSTORE_PATH" ] && warn "Keystore ada tapi password hilang dari config - keystore dibuat ulang (clone lama harus di-uninstall dulu sebelum install ulang)."
     log "Membuat keystore buat sign clone (sekali saja)..."
     local pass
     pass="$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)"
@@ -437,6 +460,16 @@ clone_roblox() {
     clear
     echo -e "${C_BOLD}===== CLONE ROBLOX (auto-sign) =====${C_RESET}"
 
+    local t
+    for t in java apktool aapt apksigner; do
+        if ! command -v "$t" >/dev/null 2>&1; then
+            err "Tools '$t' belum terinstall. Install dulu:"
+            echo "    pkg install -y openjdk-17 apktool aapt apksigner"
+            pause_back
+            return
+        fi
+    done
+
     local master="$DOWNLOAD_DIR/roblox.apk"
     if [ ! -f "$master" ]; then
         warn "APK master belum ada, download dulu (menu Auto Download Roblox)..."
@@ -487,7 +520,8 @@ download_roblox_file() {
     mkdir -p "$DOWNLOAD_DIR"
     local target="$DOWNLOAD_DIR/roblox.apk"
     log "Mengunduh APK dari: $ROBLOX_APK_URL"
-    curl -L --fail --progress-bar -o "$target" "$ROBLOX_APK_URL" || { err "Download gagal."; return 1; }
+    curl -L --fail -C - --retry 5 --retry-delay 2 --progress-bar -o "$target" "$ROBLOX_APK_URL" \
+        || { err "Download gagal (sudah dicoba lanjut otomatis 5x)."; return 1; }
     ok "Download selesai: $target"
     return 0
 }
@@ -879,11 +913,49 @@ auto_cleaner() {
 # ============================================================
 # BAGIAN 3: MENU UTAMA
 # ============================================================
+update_loader() {
+    clear
+    echo -e "${C_BOLD}===== UPDATE LOADER =====${C_RESET}"
+    echo -e "Versi sekarang: ${C_YELLOW}v$LOADER_VERSION${C_RESET}"
+
+    if [ ! -f "$SCRIPT_PATH" ]; then
+        err "Loader jalan dari pipe, bukan dari file. Download dulu:"
+        echo "  curl -sL $LOADER_URL -o loader.sh && bash loader.sh"
+        pause_back
+        return
+    fi
+
+    log "Cek versi terbaru dari GitHub..."
+    local tmp="$CONFIG_DIR/loader.new.sh" new_ver
+    curl -fsSL --max-time 120 "$LOADER_URL" -o "$tmp" || { err "Gagal download (cek koneksi)."; rm -f "$tmp"; pause_back; return; }
+    new_ver="$(grep -m1 '^LOADER_VERSION=' "$tmp" 2>/dev/null | cut -d'"' -f2)"
+    if [ -z "$new_ver" ]; then
+        err "File remote tidak valid (tidak ada LOADER_VERSION). Update dibatalkan."
+        rm -f "$tmp"; pause_back; return
+    fi
+    if [ "$new_ver" = "$LOADER_VERSION" ]; then
+        ok "Loader sudah versi terbaru (v$LOADER_VERSION)."
+        rm -f "$tmp"; pause_back; return
+    fi
+    log "Ada versi baru: v$LOADER_VERSION -> v$new_ver"
+    if cp "$tmp" "$SCRIPT_PATH"; then
+        rm -f "$tmp"
+        chmod +x "$SCRIPT_PATH"
+        ok "Update berhasil. Loader dijalankan ulang..."
+        sleep 1
+        exec bash "$SCRIPT_PATH"
+    else
+        err "Gagal menimpa $SCRIPT_PATH. Coba manual: cp '$tmp' '$SCRIPT_PATH'"
+        pause_back
+    fi
+}
+
 main_menu() {
     while true; do
         clear
         echo -e "${C_BOLD}${C_CYAN}=============================="
         echo "        LOADER - MENU UTAMA"
+        echo -e "           v$LOADER_VERSION"
         echo -e "==============================${C_RESET}"
         echo "1) System Status"
         echo "2) Join Private Server"
@@ -894,6 +966,7 @@ main_menu() {
         echo "7) Set Webhook Notifikasi"
         echo "8) Bersihkan File Sementara (hemat disk)"
         echo "9) Jalankan ulang Auto Setup"
+        echo "10) Auto Update Loader"
         echo "0) Keluar"
         echo -e "${C_CYAN}------------------------------${C_RESET}"
         ask "Pilih menu: " choice
@@ -909,6 +982,7 @@ main_menu() {
             7) set_webhook_menu ;;
             8) disk_cleanup_menu ;;
             9) run_setup ;;
+            10) update_loader ;;
             0) echo "Sampai jumpa!"; exit 0 ;;
             *) warn "Pilihan tidak valid"; sleep 1 ;;
         esac
