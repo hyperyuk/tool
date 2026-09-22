@@ -8,7 +8,7 @@
 set -u
 
 # ---------- KONFIGURASI (edit sesuai kebutuhan) ----------
-LOADER_VERSION="1.2.0"
+LOADER_VERSION="1.3.1"
 LOADER_URL="https://raw.githubusercontent.com/hyperyuk/tool/main/loader.sh"   # link mentah loader di GitHub
 ROBLOX_APK_URL="https://android.spdmteam.com/"   # link download APK Roblox yang sudah kamu siapin
 DOWNLOAD_DIR="$HOME/storage/downloads/RobloxLoader"      # folder simpan hasil download
@@ -382,6 +382,27 @@ get_apk_version() {
     aapt dump badging "$1" 2>/dev/null | grep -o "versionName='[^']*'" | sed "s/versionName='//;s/'//"
 }
 
+# aapt2 menolak nama resource yang mengandung '$' (file bawaan Material
+# Components di Roblox, contoh: drawable/$mtrl_checkbox_button...xml).
+# Rename '$nama' -> 'dnama' di file + semua referensi '@tipe/$nama' di XML,
+# tanpa mengubah isi resource-nya. Print jumlah file yang di-rename.
+sanitize_dollar_resources() {
+    local work="$1" n=0 f base new x
+    while IFS= read -r -d '' f; do
+        base="$(basename -- "$f")"
+        new="d${base//[$]/}"
+        if mv -- "$f" "$(dirname -- "$f")/$new" 2>/dev/null; then
+            n=$((n + 1))
+        fi
+    done < <(find "$work/res" -type f -name '*[$]*' -print0 2>/dev/null)
+    if [ "$n" -gt 0 ]; then
+        while IFS= read -r -d '' x; do
+            sed -i 's/@\([A-Za-z0-9_]*\)\/[$]/@\1d/g' "$x"
+        done < <(find "$work/res" -type f -name '*.xml' -print0 2>/dev/null)
+    fi
+    echo "$n"
+}
+
 get_installed_version() {
     dumpsys package "$1" 2>/dev/null | grep -m1 'versionName=' | sed 's/.*versionName=//' | awk '{print $1}'
 }
@@ -398,6 +419,29 @@ install_apk() {
     fi
 }
 
+# aapt2 menolak resource dengan nama berawalan '$' (khas resource Material
+# di Roblox, mis. drawable/$mtrl_checkbox_button...). Rename filenya
+# '$xxx' -> 'dxxx' (isi tidak diubah) dan perbaiki referensi '@tipe/$xxx'
+# di semua XML hasil decompile.
+fix_dollar_resources() {
+    local work="$1"
+    [ -d "$work/res" ] || return 0
+    local renamed=0 f dir new
+    while IFS= read -r -d '' f; do
+        dir="$(dirname "$f")"
+        new="$dir/$(basename "$f" | tr '$' 'd')"
+        if mv -f "$f" "$new" 2>/dev/null; then
+            renamed=$((renamed + 1))
+        fi
+    done < <(find "$work/res" -type f -name '*$*' -print0)
+    if [ "$renamed" -gt 0 ]; then
+        find "$work/res" "$work/original" -type f -name '*.xml' -print0 2>/dev/null |
+            xargs -0 sed -i 's/@\([a-zA-Z_][a-zA-Z_0-9]*\)\/\$/@\1\/d/g' 2>/dev/null || true
+        log "    Fix aapt2: $renamed resource '\$...' di-rename -> 'd...'"
+    fi
+    return 0
+}
+
 # Decompile master APK -> ganti package name & authorities provider ->
 # rebuild -> align -> sign. Hasil akhir: $out_apk siap install.
 build_clone_apk() {
@@ -409,6 +453,8 @@ build_clone_apk() {
 
     run_with_spinner "[1/5] Decompile APK master..." apktool d -f -o "$work" "$master_apk" \
         || { err "apktool decode gagal"; return 1; }
+
+    fix_dollar_resources "$work"
 
     local manifest="$work/AndroidManifest.xml"
     if [ ! -f "$manifest" ]; then
@@ -426,6 +472,14 @@ build_clone_apk() {
     log "[2/5] Patch package name: $orig_pkg -> $new_pkg"
     sed -i "s/package=\"$orig_pkg\"/package=\"$new_pkg\"/" "$manifest"
     sed -i "s/android:authorities=\"$orig_pkg\([^\"]*\)\"/android:authorities=\"$new_pkg\1\"/g" "$manifest"
+
+    # Ganti nama tampilan (launcher label) khusus clone: cN -> ROBLOX(CN),
+    # yang pertama kali muncul = label <application>, jadi cuma itu kena.
+    if [[ "$new_pkg" =~ c([0-9]+)$ ]]; then
+        local new_label="ROBLOX(C${BASH_REMATCH[1]})"
+        sed -i "0,/android:label=\"[^\"]*\"/s//android:label=\"$new_label\"/" "$manifest"
+        log "    Label launcher -> $new_label"
+    fi
 
     run_with_spinner "[3/5] Build ulang APK clone..." apktool b "$work" -o "$work/build.apk" \
         || { err "apktool build gagal"; return 1; }
