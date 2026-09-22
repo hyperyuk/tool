@@ -30,6 +30,20 @@ ok()   { echo -e "${C_GREEN}[OK]${C_RESET} $1"; }
 warn() { echo -e "${C_YELLOW}[!]${C_RESET} $1"; }
 err()  { echo -e "${C_RED}[X]${C_RESET} $1"; }
 
+# read input yang tahan terhadap Enter (\r) dari keyboard Termux tertentu
+ask() {
+    local _p="$1" _v="$2" _val _rc=0
+    IFS= read -rp "$_p" _val || _rc=$?
+    _val="${_val//[[:cntrl:]]/}"
+    _val="${_val#"${_val%%[![:space:]]*}"}"
+    _val="${_val%"${_val##*[![:space:]]}"}"
+    if [ "$_rc" -ne 0 ] && [ -z "$_val" ]; then
+        err "Tidak ada input (stdin tertutup / EOF). Jalanin dengan 'bash loader.sh', bukan 'curl ... | bash'."
+        exit 1
+    fi
+    eval "$_v=\$_val"
+}
+
 mkdir -p "$CONFIG_DIR"
 touch "$CONFIG_FILE"
 # muat config lama (kalau ada)
@@ -146,7 +160,7 @@ pilih_akun() {
 
     if [ "${#pkgs[@]}" -eq 0 ]; then
         err "Tidak ada package Roblox terdeteksi di perangkat ini." >&2
-        read -rp "Masukkan nama package manual (kosongkan buat batal): " manual >&2
+        ask "Masukkan nama package manual (kosongkan buat batal): " manual
         echo "$manual"
         return
     fi
@@ -165,7 +179,7 @@ pilih_akun() {
         echo -e "  ${C_CYAN}0.${C_RESET} Kembali"
     } >&2
 
-    read -rp "Pilih nomor akun: " pilihan >&2
+    ask "Pilih nomor akun: " pilihan
     if [ "$pilihan" = "0" ] || [ -z "$pilihan" ]; then
         echo ""
         return
@@ -192,7 +206,7 @@ join_private_server() {
     fi
 
     echo -e "Akun dipilih: ${C_GREEN}${pkg}${C_RESET}"
-    read -rp "Tempel link private server (roblox://... / https://www.roblox.com/games/...?privateServerLinkCode=...): " link
+    ask "Tempel link private server (roblox://... / https://www.roblox.com/games/...?privateServerLinkCode=...): " link
     if [ -z "$link" ]; then
         warn "Link kosong, dibatalkan."
         pause_back
@@ -249,7 +263,7 @@ disk_cleanup_menu() {
     echo "3) Hapus APK master yang udah didownload (roblox.apk)"
     echo "4) Hapus semuanya (folder kerja + APK clone + APK master)"
     echo "0) Kembali"
-    read -rp "Pilih: " pilihan
+    ask "Pilih: " pilihan
 
     case "$pilihan" in
         1)
@@ -278,7 +292,7 @@ disk_cleanup_menu() {
 
 pause_back() {
     echo ""
-    read -rp "Tekan ENTER untuk kembali ke menu..." _
+    ask "Tekan ENTER untuk kembali ke menu..." _
 }
 
 # Jalankan command di background sambil nampilin spinner + label, biar user
@@ -357,7 +371,7 @@ install_apk() {
     else
         log "Buka installer buat: $(basename "$apk") (tap Install di layar)"
         termux-open "$apk"
-        read -rp "Tekan ENTER kalau instalasi sudah selesai/di-tap..." _
+        ask "Tekan ENTER kalau instalasi sudah selesai/di-tap..." _
     fi
 }
 
@@ -436,7 +450,7 @@ clone_roblox() {
     local existing
     existing="$(wc -l < "$CLONES_LIST" | tr -d ' ')"
 
-    read -rp "Mau bikin berapa clone? " jumlah
+    ask "Mau bikin berapa clone? " jumlah
     if ! [[ "$jumlah" =~ ^[0-9]+$ ]] || [ "$jumlah" -lt 1 ]; then
         warn "Jumlah tidak valid."
         pause_back
@@ -559,7 +573,7 @@ pilih_akun_multi() {
         echo -e "Contoh: 1,3  atau  1 2 4  atau ketik 'all'"
     } >&2
 
-    read -rp "Pilih akun yang mau di-monitor: " pilihan >&2
+    ask "Pilih akun yang mau di-monitor: " pilihan
     if [ -z "$pilihan" ] || [ "$pilihan" = "0" ]; then
         return
     fi
@@ -676,7 +690,7 @@ set_webhook_menu() {
     clear
     echo -e "${C_BOLD}===== SET WEBHOOK NOTIFIKASI (Discord) =====${C_RESET}"
     echo -e "Webhook saat ini: ${C_YELLOW}${WEBHOOK_URL:-belum diset}${C_RESET}"
-    read -rp "Masukkan Discord webhook URL (kosongkan buat batal): " input
+    ask "Masukkan Discord webhook URL (kosongkan buat batal): " input
     if [ -z "$input" ]; then
         pause_back
         return
@@ -725,7 +739,7 @@ auto_cleaner() {
     echo "7) OOM Priority rendah (akun paling akhir dibunuh saat RAM penuh)"
     echo "8) Notifikasi Crash/Disconnect ke Webhook (notif only, tanpa auto-rejoin)"
     echo "all) Aktifkan semua fitur"
-    read -rp "Pilih fitur (contoh: 1,3,5 atau 'all'): " featinput
+    ask "Pilih fitur (contoh: 1,3,5 atau 'all'): " featinput
 
     local -a FEATS
     if [ "$(echo "$featinput" | tr '[:upper:]' '[:lower:]')" = "all" ]; then
@@ -749,12 +763,12 @@ auto_cleaner() {
 
     local ram_threshold=0
     if has_feat 1; then
-        read -rp "RAM Cleanup cuma jalan kalau RAM tersisa di bawah berapa MB? [default 700]: " ram_threshold
+        ask "RAM Cleanup cuma jalan kalau RAM tersisa di bawah berapa MB? [default 700]: " ram_threshold
         [[ "$ram_threshold" =~ ^[0-9]+$ ]] || ram_threshold=700
         log "RAM Cleanup: threshold ${ram_threshold}MB (skip kalau RAM masih aman, biar gak buang-buang cache yang lagi kepake Roblox)"
     fi
 
-    read -rp "Interval cek dalam detik [default 30]: " interval
+    ask "Interval cek dalam detik [default 30]: " interval
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
     if [ "$interval" -lt 10 ]; then
         warn "Interval di bawah 10 detik lumayan berat (Storage Cleanup/Standby Bucket/OOM jalan tiap siklus). Kalau device kerasa lag/panas, naikin intervalnya."
@@ -882,7 +896,8 @@ main_menu() {
         echo "9) Jalankan ulang Auto Setup"
         echo "0) Keluar"
         echo -e "${C_CYAN}------------------------------${C_RESET}"
-        read -rp "Pilih menu: " choice
+        ask "Pilih menu: " choice
+        choice="${choice//[[:space:]]/}"
 
         case "$choice" in
             1) show_status ;;
